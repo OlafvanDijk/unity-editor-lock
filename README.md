@@ -20,7 +20,8 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 
 ## What it does
 - Every `unity command ...` call (also `cmd`, `recompile`, `test`, `close`, `shell`, `job`, `watch`, `open`, `run`, `build`) and every computer-use call takes the lock. Read-only commands count too, so nobody changes or reads Editor state during someone else's playtest.
-- A blocked session must tell you who blocks it and ask with buttons:
+- At the start of each playtest the session asks you with buttons for its priority: **Normal**, **High** or **You decide** (the session rates itself). The answer is valid 30 minutes and is stored in the lock.
+- A blocked session with equal or lower priority waits on its own, keeps you informed in chat, and never asks or forces (after 10 minutes it asks Keep waiting / Give up). A blocked **High** session facing a **Normal** holder tells you who blocks it and asks with buttons:
   - **Wait**: it polls with `wait` until the lock is free, then retries.
   - **Force takeover**: it cancels the holder's tests, stops play mode and takes the lock.
 - The lock is shared by every session and worktree on the same PC: it lives in `%USERPROFILE%\.claude\locks`, not in the project. It does **not** coordinate between different computers; each PC has its own Editor and its own lock.
@@ -31,7 +32,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - All reads and writes run under a named mutex. If the hook itself fails on a matched call, that call is blocked with a retry message instead of running unlocked.
 
 ## Script modes
-`pre`, `stop`, `release` are used by the hooks. Manual modes: `status`, `wait`, `force [sessionId]`, run as
+`pre`, `stop`, `release` are used by the hooks. Manual modes: `status`, `wait`, `force [sessionId]`, `priority <high|normal> <sessionId>`, run as
 `powershell -NoProfile -ExecutionPolicy Bypass -File "<plugin folder>/scripts/unity-lock.ps1" status`.
 
 ## Terminal notes
@@ -43,6 +44,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - A dead session that left play mode on blocks others until `force` or the 30 minute cap.
 - Background subagents lose the lock after the 60 second grace when they make no Unity calls.
 - The session link lookup reads the Claude desktop app's own session files; if that layout changes, the message falls back to the bare session id.
+- Priority is the session model's own judgment unless you pick it; two High sessions wait first-come.
 - Windows only.
 
 ## License

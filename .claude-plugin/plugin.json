@@ -1,6 +1,6 @@
 {
   "name": "unity-editor-lock",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shared lock for the Unity Editor: stops parallel Claude sessions from interrupting each other's playtests, shows the user who blocks them, and lets the user choose Wait or Force takeover.",
   "author": { "name": "OvanD" }
 }

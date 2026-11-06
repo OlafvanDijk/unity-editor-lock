@@ -7,7 +7,7 @@
       "name": "unity-editor-lock",
       "source": "./",
       "description": "Shared lock for the Unity Editor: blocked sessions tell the user who blocks them and offer Wait or Force takeover.",
-      "version": "1.1.0"
+      "version": "1.2.0"
     }
   ]
 }

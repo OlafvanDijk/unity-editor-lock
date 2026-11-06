@@ -1,7 +1,8 @@
 # Shared Unity Editor lock.
 # Modes: pre (PreToolUse hook), stop (Stop hook: 1 minute grace), release (SessionEnd hook),
-#        force [sessionId] (manual takeover, hands the lock to sessionId), status.
-param([string]$Mode = 'status', [string]$ForceSession = '')
+#        force [sessionId] (manual takeover, hands the lock to sessionId), status, wait,
+#        priority <high|normal> <sessionId> (records the playtest priority of a session).
+param([string]$Mode = 'status', [string]$ForceSession = '', [string]$Extra = '')
 
 $lockDir = Join-Path $env:USERPROFILE '.claude\locks'
 $lockFile = Join-Path $lockDir 'unity-editor.lock'
@@ -9,13 +10,15 @@ $holdMinutes = 5
 $graceSeconds = 60
 $corruptSeconds = 5
 $hardCapMinutes = 30
+$priorityMinutes = 30
+$escalateMinutes = 10
 $mutexWaitMs = 10000
 $scriptPath = $PSCommandPath -replace '\\', '/'
 New-Item -ItemType Directory -Force $lockDir | Out-Null
 
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 $raw = ''
-if ($Mode -ne 'status' -and $Mode -ne 'force' -and $Mode -ne 'wait') { $raw = [Console]::In.ReadToEnd() }
+if ($Mode -ne 'status' -and $Mode -ne 'force' -and $Mode -ne 'wait' -and $Mode -ne 'priority') { $raw = [Console]::In.ReadToEnd() }
 $data = $null
 if ($raw) { try { $data = $raw | ConvertFrom-Json } catch {} }
 $sessionId = if ($data -and $data.session_id) { [string]$data.session_id } else { 'unknown' }
@@ -60,9 +63,9 @@ function Read-Lock {
 }
 
 # Write via temp file + swap so the lock file is never half-written. Call inside the mutex.
-function Write-Lock($session, $cwd, $purpose, $expires, $time = $null) {
+function Write-Lock($session, $cwd, $purpose, $expires, $time = $null, $priority = 'normal') {
 	if (-not $time) { $time = (Get-Date).ToString('o') }
-	$json = @{ session = $session; cwd = $cwd; purpose = $purpose; time = $time; expires = $expires.ToString('o') } | ConvertTo-Json
+	$json = @{ session = $session; cwd = $cwd; purpose = $purpose; time = $time; expires = $expires.ToString('o'); priority = $priority } | ConvertTo-Json
 	$tmp = "$lockFile.$PID.tmp"
 	Set-Content -Path $tmp -Value $json -Encoding utf8
 	for ($attempt = 1; $attempt -le 5; $attempt++) {
@@ -75,6 +78,22 @@ function Write-Lock($session, $cwd, $purpose, $expires, $time = $null) {
 		}
 	}
 }
+
+# Per-session playtest priority answer (high|normal), valid 30 minutes sliding. $null = not answered / expired = ask again.
+function Get-PriorityFile($id) { return Join-Path $lockDir ('priority-' + ($id -replace '[^\w-]', '_') + '.json') }
+function Read-Priority($id) {
+	try {
+		$rec = Get-Content (Get-PriorityFile $id) -Raw -ErrorAction Stop | ConvertFrom-Json
+		if (((Get-Date) - [datetime]::Parse($rec.time)).TotalMinutes -gt $priorityMinutes) { return $null }
+		return $rec
+	} catch { return $null }
+}
+function Save-Priority($id, $value, $waitSince = $null) {
+	$rec = @{ value = $value; time = (Get-Date).ToString('o') }
+	if ($waitSince) { $rec.waitSince = $waitSince }
+	Set-Content -Path (Get-PriorityFile $id) -Value ($rec | ConvertTo-Json) -Encoding utf8
+}
+function Get-LockPriority($lock) { if ($lock -and $lock.priority -eq 'high') { return 'high' } else { return 'normal' } }
 
 # True unless the Editor clearly reports: edit mode, not compiling/reloading, no test running. Unreachable counts as busy.
 function Test-EditorBusy {
@@ -145,7 +164,7 @@ function Get-HolderLabel($cliId, $holderCwd = '') {
 switch ($Mode) {
 	'status' {
 		$lock = Read-Lock
-		if ($lock) { "Unity Editor lock held by $(Get-HolderLabel $lock.session $lock.cwd) since $($lock.time), expires $($lock.expires) ($($lock.purpose)) in $($lock.cwd). To take over: powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" force <your session id>" } else { 'Unity Editor is free.' }
+		if ($lock) { "Unity Editor lock held by $(Get-HolderLabel $lock.session $lock.cwd) since $($lock.time) (priority $(Get-LockPriority $lock)), expires $($lock.expires) ($($lock.purpose)) in $($lock.cwd). To take over: powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" force <your session id>" } else { 'Unity Editor is free.' }
 	}
 	'wait' {
 		# Polls (up to ~100s per call) until the lock is free or takeable; does not take it. Exit 0 = free, 3 = still held.
@@ -158,7 +177,7 @@ switch ($Mode) {
 				if ($timing.expired -and -not $timing.pastCap) { $busy = Test-EditorBusy }
 			}
 			if (Test-CanTake $lock $busy) { 'Unity Editor is free now. Retry your command.'; exit 0 }
-			if ((Get-Date) -gt $deadline) { "Still held by $(Get-HolderLabel $lock.session $lock.cwd) until about $($lock.expires). Run wait again, or ask the user to force."; exit 3 }
+			if ((Get-Date) -gt $deadline) { "Still held by $(Get-HolderLabel $lock.session $lock.cwd) until about $($lock.expires). Run wait again, and tell the user in one line that you are still waiting."; exit 3 }
 			Start-Sleep -Seconds 5
 		}
 	}
@@ -168,12 +187,18 @@ switch ($Mode) {
 		try {
 			$lock = Read-Lock
 			if (Test-Path $lockFile) { Remove-Item $lockFile -Force }
-			if ($ForceSession) { Write-Lock $ForceSession '' 'took over via force' (Get-Date).AddMinutes($holdMinutes) }
+			if ($ForceSession) { $fp = Read-Priority $ForceSession; Write-Lock $ForceSession '' 'took over via force' (Get-Date).AddMinutes($holdMinutes) $null $(if ($fp) { [string]$fp.value } else { 'normal' }) }
 		} finally { if ($got) { Exit-Mutex } }
 		$who = if ($lock) { "session $($lock.session)" } else { 'nobody' }
 		"Cancelled running tests, stopped play mode and cleared the lock held by $who." + $(if ($ForceSession) { " The lock now belongs to session $ForceSession." } else { ' No session id was given, so the lock is free.' })
 	}
+	'priority' {
+		if (($ForceSession -ne 'high' -and $ForceSession -ne 'normal') -or -not $Extra) { 'Usage: priority <high|normal> <sessionId>'; exit 1 }
+		Save-Priority $Extra $ForceSession
+		"Priority of session $Extra set to $ForceSession. Retry your Unity command."
+	}
 	'release' {
+		Remove-Item (Get-PriorityFile $sessionId) -Force -ErrorAction SilentlyContinue
 		$got = Enter-Mutex
 		if ($got) {
 			try {
@@ -189,7 +214,7 @@ switch ($Mode) {
 				$lock = Read-Lock
 				if ($lock -and -not $lock.corrupt -and $lock.session -eq $sessionId) {
 					$graceEnd = (Get-Date).AddSeconds($graceSeconds)
-					if ([datetime]::Parse($lock.expires) -gt $graceEnd) { Write-Lock $sessionId $lock.cwd $lock.purpose $graceEnd ([string]$lock.time) }
+					if ([datetime]::Parse($lock.expires) -gt $graceEnd) { Write-Lock $sessionId $lock.cwd $lock.purpose $graceEnd ([string]$lock.time) (Get-LockPriority $lock) }
 				}
 			} catch {} finally { Exit-Mutex }
 		}
@@ -215,6 +240,17 @@ switch ($Mode) {
 
 		$message = $null
 		$capTakeover = $false
+		$myPrio = Read-Priority $sessionId
+		$prioCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" priority"
+		if ($null -eq $myPrio -and $sessionId -ne 'unknown') {
+			[Console]::Error.WriteLine("UNITY EDITOR LOCK: a new playtest starts, so the user may set its priority first (a high priority session may force a normal one, otherwise it waits silently).`n" +
+				"DO THIS NOW: ask the user with the AskUserQuestion tool so they get BUTTONS (if deferred, load it with ToolSearch query select:AskUserQuestion): one question, multiSelect false, three options: 'Normal' (waits for other sessions), 'High' (may force a normal session off the Editor) and 'You decide' (you rate it yourself). If AskUserQuestion is unavailable (e.g. you are a background subagent), use normal.`n" +
+				"Then run: $prioCmd <high|normal> $sessionId . For Normal use normal, for High use high. For 'You decide' use high only if the user is actively waiting on this result right now or this is a quest checkpoint, otherwise normal. Then retry your command.")
+			exit 2
+		}
+		$myLevel = if ($myPrio) { [string]$myPrio.value } else { 'normal' }
+		$waitSinceOld = if ($myPrio -and $myPrio.waitSince) { [string]$myPrio.waitSince } else { $null }
+		if ($myPrio) { Save-Priority $sessionId $myLevel $waitSinceOld }
 		try {
 			# First read under a brief mutex hold; the slow Editor check runs outside the mutex and only when it can matter.
 			$first = $null
@@ -237,14 +273,29 @@ switch ($Mode) {
 						$message = "Unity Editor lock just changed hands (now held by session $($lock.session)). Wait and retry in a minute."
 					} elseif (Test-CanTake $lock $busy) {
 						if ($lock -and -not $lock.corrupt -and $lock.session -ne $sessionId -and (Get-LockTiming $lock).pastCap) { $capTakeover = $true }
-						Write-Lock $sessionId $cwd $purpose (Get-Date).AddMinutes($holdMinutes)
+						Write-Lock $sessionId $cwd $purpose (Get-Date).AddMinutes($holdMinutes) $null $myLevel
+						if ($waitSinceOld) { Save-Priority $sessionId $myLevel }
 					} else {
 						$holder = Get-HolderLabel $lock.session $lock.cwd
 						$tellUser = if ($holder -match '^\[') { "pasting this link exactly as written: $holder" } else { "describing it exactly like this so they can find that session: $holder" }
-						$message = "UNITY EDITOR LOCK: your playtest/Unity command is blocked by $holder (running '$($lock.purpose)' since $($lock.time)). The lock frees by itself once that session's lock has lapsed and the Editor is idle.`n" +
+						$holderLevel = Get-LockPriority $lock
+						$levels = "(holder priority $holderLevel, yours $myLevel)"
+						$waitCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" wait"
+						if (-not ($myLevel -eq 'high' -and $holderLevel -eq 'normal')) {
+							$since = if ($waitSinceOld) { $waitSinceOld } else { (Get-Date).ToString('o') }
+							if (-not $waitSinceOld) { Save-Priority $sessionId $myLevel $since }
+							$waited = ((Get-Date) - [datetime]::Parse($since)).TotalMinutes
+							if ($waited -gt $escalateMinutes) {
+								$message = "UNITY EDITOR LOCK: you have waited over $escalateMinutes minutes for $holder $levels. Tell the user in your next message, $tellUser , then ask with the AskUserQuestion tool (BUTTONS, not plain text; load it with ToolSearch query select:AskUserQuestion if deferred): options 'Keep waiting' and 'Give up for now'. Keep waiting: run $prioCmd $myLevel $sessionId (resets the timer), then $waitCmd (repeat while it exits 3), then retry. Give up: stop trying the Editor and say so. Do NOT force."
+							} else {
+								$message = "UNITY EDITOR LOCK: the Editor is in use by $holder $levels (running '$($lock.purpose)'). Your priority is not higher, so DO NOT ask the user and do NOT force. But keep the user informed in chat: (1) say now, in one short line, that you are waiting for the Unity Editor and who holds it, $tellUser . (2) Run $waitCmd (repeat while it exits 3, and after each round say in one short line that you are still waiting). (3) When it exits 0, say in one line that the Editor is free and retry your command."
+							}
+						} else {
+						$message = "UNITY EDITOR LOCK: your playtest/Unity command is blocked by $holder $levels (running '$($lock.purpose)' since $($lock.time)). The lock frees by itself once that session's lock has lapsed and the Editor is idle.`n" +
 							"DO THIS NOW: (1) tell the user in your next message that you are blocked and by which session, $tellUser . (2) Ask the user with the AskUserQuestion tool so they get BUTTONS, never as plain text (if the tool is deferred, load it first with ToolSearch query select:AskUserQuestion): one question, multiSelect false, two options: label 'Wait' (description: wait until that session's lock ends, then continue) and label 'Force takeover' (description: cancels that session's running test and stops play mode, then takes the Editor). Do NOT force without the user's answer.`n" +
 							"If the user chooses Wait: run powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" wait (repeat while it exits 3), then retry your command.`n" +
 							"If the user chooses Force: run powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" force $sessionId , then retry your command."
+						}
 					}
 				}
 			} finally { if ($got) { Exit-Mutex } }
