@@ -1,0 +1,13 @@
+{
+  "name": "unity-editor-lock",
+  "description": "Shared Unity Editor lock for parallel Claude sessions.",
+  "owner": { "name": "OlafvanDijk" },
+  "plugins": [
+    {
+      "name": "unity-editor-lock",
+      "source": "./",
+      "description": "Shared lock for the Unity Editor: blocked sessions tell the user who blocks them and offer Wait or Force takeover.",
+      "version": "1.0.0"
+    }
+  ]
+}
