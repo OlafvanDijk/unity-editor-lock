@@ -1,10 +1,10 @@
 # unity-editor-lock
 
-A Claude Code plugin that stops parallel Claude sessions from interrupting each other's Unity Editor testing. One session at a time holds an exclusive lock on the Editor. A blocked session tells you which session blocks it (with a clickable link in the Claude desktop app) and lets you choose **Wait** or **Force takeover** with buttons.
+A Claude Code plugin that stops parallel Claude sessions from interrupting each other's Unity Editor testing. One session at a time holds an exclusive lock on the Editor. A blocked session tells you which session blocks it and lets you choose **Wait** or **Force takeover** with buttons. It works in both the Claude desktop app and the Claude Code terminal, and sessions of both kinds on the same PC share one lock.
 
 ## Requirements
 - Windows with Windows PowerShell 5.1 (included with Windows 10/11).
-- Claude Code (CLI or desktop app). Session links in block messages need the Claude desktop app; without it the message shows the bare session id.
+- Claude Code (terminal CLI or desktop app). In the desktop app the blocker is shown as a clickable session link. In the terminal there is no link, so the message describes the blocking session instead: its title or first prompt, a short id, its folder, when it was last active, and the `claude --resume <id>` command to open it.
 - The Unity CLI (`unity`) on your PATH. The lock detects `unity command ...` calls and asks the Editor whether it is idle.
 - Git, to let Claude Code clone the plugin.
 
@@ -33,6 +33,10 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 ## Script modes
 `pre`, `stop`, `release` are used by the hooks. Manual modes: `status`, `wait`, `force [sessionId]`, run as
 `powershell -NoProfile -ExecutionPolicy Bypass -File "<plugin folder>/scripts/unity-lock.ps1" status`.
+
+## Terminal notes
+- Closing a terminal abruptly (window close, Ctrl+C) may skip the SessionEnd hook. The orphaned lock then lapses on its own within about 5 minutes, or you can pick **Force takeover** in the next blocked session.
+- The Wait / Force buttons use Claude Code's `AskUserQuestion` tool, which shows as a menu in the terminal.
 
 ## Known limits
 - A plain capital-U `Unity command x` and variable-as-program calls (`& $u command`) are not detected.

@@ -110,7 +110,7 @@ function Test-CanTake($lock, $busy) {
 
 # Looks up the app session that owns a hook session id, so the user gets a clickable link to the blocker.
 # Uses the app's own session files (cliSessionId); falls back to the bare id if that layout ever changes.
-function Get-HolderLabel($cliId) {
+function Get-HolderLabel($cliId, $holderCwd = '') {
 	try {
 		$pattern = Join-Path $env:LOCALAPPDATA 'Claude-Data\*\claude-code-sessions\*\*\local_*.json'
 		$needle = '"cliSessionId":"' + $cliId + '"'
@@ -122,13 +122,30 @@ function Get-HolderLabel($cliId) {
 			return "[$title](#$appId)"
 		}
 	} catch {}
-	return "session $cliId (no app link found)"
+	# Terminal (CLI) sessions have no app link: describe the session from its transcript instead.
+	try {
+		$transcript = Get-ChildItem -Path (Join-Path $env:USERPROFILE ".claude\projects\*\$cliId.jsonl") -ErrorAction SilentlyContinue | Select-Object -First 1
+		if ($transcript) {
+			$name = $null
+			$titleHit = Select-String -Path $transcript.FullName -Pattern '"customTitle":"((?:[^"\\]|\\.)*)"' | Select-Object -Last 1
+			if ($titleHit) { $name = $titleHit.Matches[0].Groups[1].Value }
+			if (-not $name) {
+				$promptHit = Select-String -Path $transcript.FullName -Pattern '"type":"user".*?"content":"((?:[^"\\]|\\.){1,80})' | Select-Object -First 1
+				if ($promptHit) { $name = $promptHit.Matches[0].Groups[1].Value }
+			}
+			if (-not $name) { $name = 'untitled' }
+			$name = ($name -replace '\\[nrt]', ' ') -replace '\\"', '"'
+			$folder = if ($holderCwd) { $holderCwd } else { 'unknown folder' }
+			return "session `"$name`" (id $($cliId.Substring(0, [Math]::Min(8, $cliId.Length))), folder $folder, last active $($transcript.LastWriteTime.ToString('HH:mm'))); in a terminal, look for the Claude window in that folder, or open it with: claude --resume $cliId"
+		}
+	} catch {}
+	return "session $cliId (no session description found)"
 }
 
 switch ($Mode) {
 	'status' {
 		$lock = Read-Lock
-		if ($lock) { "Unity Editor lock held by $(Get-HolderLabel $lock.session) since $($lock.time), expires $($lock.expires) ($($lock.purpose)) in $($lock.cwd). To take over: powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" force <your session id>" } else { 'Unity Editor is free.' }
+		if ($lock) { "Unity Editor lock held by $(Get-HolderLabel $lock.session $lock.cwd) since $($lock.time), expires $($lock.expires) ($($lock.purpose)) in $($lock.cwd). To take over: powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" force <your session id>" } else { 'Unity Editor is free.' }
 	}
 	'wait' {
 		# Polls (up to ~100s per call) until the lock is free or takeable; does not take it. Exit 0 = free, 3 = still held.
@@ -141,7 +158,7 @@ switch ($Mode) {
 				if ($timing.expired -and -not $timing.pastCap) { $busy = Test-EditorBusy }
 			}
 			if (Test-CanTake $lock $busy) { 'Unity Editor is free now. Retry your command.'; exit 0 }
-			if ((Get-Date) -gt $deadline) { "Still held by $(Get-HolderLabel $lock.session) until about $($lock.expires). Run wait again, or ask the user to force."; exit 3 }
+			if ((Get-Date) -gt $deadline) { "Still held by $(Get-HolderLabel $lock.session $lock.cwd) until about $($lock.expires). Run wait again, or ask the user to force."; exit 3 }
 			Start-Sleep -Seconds 5
 		}
 	}
@@ -222,9 +239,10 @@ switch ($Mode) {
 						if ($lock -and -not $lock.corrupt -and $lock.session -ne $sessionId -and (Get-LockTiming $lock).pastCap) { $capTakeover = $true }
 						Write-Lock $sessionId $cwd $purpose (Get-Date).AddMinutes($holdMinutes)
 					} else {
-						$holder = Get-HolderLabel $lock.session
+						$holder = Get-HolderLabel $lock.session $lock.cwd
+						$tellUser = if ($holder -match '^\[') { "pasting this link exactly as written: $holder" } else { "describing it exactly like this so they can find that session: $holder" }
 						$message = "UNITY EDITOR LOCK: your playtest/Unity command is blocked by $holder (running '$($lock.purpose)' since $($lock.time)). The lock frees by itself once that session's lock has lapsed and the Editor is idle.`n" +
-							"DO THIS NOW: (1) tell the user in your next message that you are blocked and by which session, pasting this link exactly as written: $holder . (2) Ask the user with the AskUserQuestion tool so they get BUTTONS, never as plain text (if the tool is deferred, load it first with ToolSearch query select:AskUserQuestion): one question, multiSelect false, two options: label 'Wait' (description: wait until that session's lock ends, then continue) and label 'Force takeover' (description: cancels that session's running test and stops play mode, then takes the Editor). Do NOT force without the user's answer.`n" +
+							"DO THIS NOW: (1) tell the user in your next message that you are blocked and by which session, $tellUser . (2) Ask the user with the AskUserQuestion tool so they get BUTTONS, never as plain text (if the tool is deferred, load it first with ToolSearch query select:AskUserQuestion): one question, multiSelect false, two options: label 'Wait' (description: wait until that session's lock ends, then continue) and label 'Force takeover' (description: cancels that session's running test and stops play mode, then takes the Editor). Do NOT force without the user's answer.`n" +
 							"If the user chooses Wait: run powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" wait (repeat while it exits 3), then retry your command.`n" +
 							"If the user chooses Force: run powershell -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" force $sessionId , then retry your command."
 					}
