@@ -24,7 +24,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - A blocked session with equal or lower priority waits on its own, keeps you informed in chat, and never asks or forces (after 10 minutes it asks Keep waiting / Give up). A blocked **High** session facing a **Normal** holder tells you who blocks it and asks with buttons:
   - **Wait**: it polls with `wait` until the lock is free, then retries.
   - **Force takeover**: it cancels the holder's tests, stops play mode and takes the lock.
-- There is one lock per Unity project, shared by every session on the same PC that uses that project folder (a worktree is a different folder, so it gets its own lock): sessions on different projects never block each other. The project is the `--project-path` of the Unity command, else `UNITY_PROJECT_PATH`, else the first folder upward from the session's folder that holds `ProjectSettings/ProjectVersion.txt`; computer use always uses the session's folder. Sessions outside any Unity project share one fallback lock, `unknown`. The locks live in `%USERPROFILE%\.claude\locks`, not in the project. They do **not** coordinate between different computers; each PC has its own Editors and its own locks.
+- There is one lock per Unity project, shared by every session on the same PC that uses that project folder (a worktree is a different folder, so it gets its own lock): sessions on different projects never block each other. The project is the `--project-path` of the Unity command, else `UNITY_PROJECT_PATH`, else the first folder upward from the session's folder that holds `ProjectSettings/ProjectVersion.txt`; computer use always uses the session's folder. A session outside any Unity project (no project path and no Unity project around its folder) is not locked at all: it never takes or waits on a lock. The locks live in `%USERPROFILE%\.claude\locks`, not in the project. They do **not** coordinate between different computers; each PC has its own Editors and its own locks.
 
 ## Lock rules
 - A command by the owner refreshes the lock to 5 minutes. When a turn ends the lock shrinks to a 60 second grace, and ending the session releases it.
@@ -35,7 +35,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 `pre`, `stop`, `release` are used by the hooks (`stop` and `release` act on every project lock the session holds). Manual modes, run as
 `powershell -NoProfile -ExecutionPolicy Bypass -File "<plugin folder>/scripts/unity-lock.ps1" status`:
 - `status`: lists every held lock with its project.
-- `wait [project]` and `force [project] [sessionId]`: `project` is the Unity project folder or `unknown`; omitted, it is the project around the current folder. Block messages print these commands with the project filled in.
+- `wait [project]` and `force [project] [sessionId]`: `project` is the Unity project folder; omitted, it is the project around the current folder. Block messages print these commands with the project filled in.
 - `priority <high|normal> <sessionId>`.
 
 ## Terminal notes

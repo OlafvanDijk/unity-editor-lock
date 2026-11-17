@@ -2,7 +2,8 @@
 # Modes: pre (PreToolUse hook), stop (Stop hook: 1 minute grace), release (SessionEnd hook), status,
 #        wait [project], force [project] [sessionId] (manual takeover, hands the lock to sessionId),
 #        priority <high|normal> <sessionId> (records the playtest priority of a session).
-# [project] is a Unity project folder or 'unknown' (the shared fallback); omitted = the project around the current folder.
+# [project] is a Unity project folder; omitted = the project around the current folder.
+# A session outside any Unity project never takes or waits on a lock.
 param([string]$Mode = 'status', [string]$Arg1 = '', [string]$Arg2 = '')
 
 $lockDir = Join-Path $env:USERPROFILE '.claude\locks'
@@ -36,7 +37,7 @@ function Get-FullPath($path, $base = $null) {
 	} catch { return $null }
 }
 
-# Walks up from $dir to the first folder holding ProjectSettings\ProjectVersion.txt; 'unknown' if there is none.
+# Walks up from $dir to the first folder holding ProjectSettings\ProjectVersion.txt; $null if there is none.
 function Find-ProjectRoot($dir) {
 	try {
 		$dir = if ($dir) { Get-FullPath $dir } else { $null }
@@ -45,7 +46,7 @@ function Find-ProjectRoot($dir) {
 			$dir = [System.IO.Path]::GetDirectoryName($dir)
 		}
 	} catch {}
-	return 'unknown'
+	return $null
 }
 
 # The project a Unity command targets, in the Unity CLI's own order: --project-path, UNITY_PROJECT_PATH, auto-detect.
@@ -57,11 +58,10 @@ function Get-CommandProject($command, $cwd) {
 	return Find-ProjectRoot $cwd
 }
 
-# Project argument of wait/force: a folder (taken as is) or 'unknown'; omitted = the project around the current folder.
+# Project argument of wait/force: a folder (taken as is); omitted = the project around the current folder.
 # $null for anything else, so an old-style 'force <sessionId>' cannot clear a made-up project.
 function Resolve-ProjectArg($value) {
 	if (-not $value) { return Find-ProjectRoot $PWD.Path }
-	if ($value -eq 'unknown') { return 'unknown' }
 	$full = Get-FullPath $value $PWD.Path
 	if ($full -and ([System.IO.Path]::IsPathRooted($value) -or (Test-Path -LiteralPath $full -PathType Container))) { return $full }
 	return $null
@@ -103,8 +103,7 @@ function Get-Slot($project) {
 }
 # Every per-project lock file on disk (the legacy global unity-editor.lock does not match).
 function Get-LockFiles { return @(Get-ChildItem -Path $lockDir -Filter 'unity-editor-*.lock' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^unity-editor-[0-9a-f]+\.lock$' }) }
-function Get-AllSlots { foreach ($file in Get-LockFiles) { New-Slot 'unknown' $file.FullName ('Global\ClaudeUnityEditorLock-' + $file.BaseName.Substring(13)) } }
-function Get-LockProject($lock) { if ($lock -and $lock.project) { return [string]$lock.project } else { return 'unknown' } }
+function Get-AllSlots { foreach ($file in Get-LockFiles) { New-Slot $null $file.FullName ('Global\ClaudeUnityEditorLock-' + $file.BaseName.Substring(13)) } }
 
 # Returns $null (no lock), a lock object, or a lock object with corrupt=$true (unparsable/incomplete file).
 function Read-Lock($lockFile) {
@@ -158,25 +157,20 @@ function Save-Priority($id, $value, $waitSince = $null) {
 }
 function Get-LockPriority($lock) { if ($lock -and $lock.priority -eq 'high') { return 'high' } else { return 'normal' } }
 
-# Unity CLI arguments that target the Editor of $project ('unknown' = let the CLI auto-detect, as before).
-function Get-ProjectCliArgs($project) { if ($project -and $project -ne 'unknown') { return @('--project-path', $project) } else { return @() } }
-
 # True unless the Editor clearly reports: edit mode, not compiling/reloading, no test running. Unreachable counts as busy.
 function Test-EditorBusy($project) {
-	$pa = @(Get-ProjectCliArgs $project)
 	try {
-		$out = & unity command @pa editor_status --json --timeout 10 2>$null | Out-String
+		$out = & unity command --project-path $project editor_status --json --timeout 10 2>$null | Out-String
 		$editor = ($out | ConvertFrom-Json).data.result
 		if ($editor.playMode -ne 'stopped' -or $editor.compiling -or $editor.domainReloadInProgress) { return $true }
-		$out = & unity command @pa test_status --json --timeout 10 2>$null | Out-String
+		$out = & unity command --project-path $project test_status --json --timeout 10 2>$null | Out-String
 		return ((($out | ConvertFrom-Json).data.result.status) -ne 'no_tests')
 	} catch { return $true }
 }
 
 function Stop-EditorActivity($project) {
-	$pa = @(Get-ProjectCliArgs $project)
-	& unity command @pa cancel_tests --timeout 10 2>$null | Out-Null
-	& unity command @pa editor_stop --timeout 10 2>$null | Out-Null
+	& unity command --project-path $project cancel_tests --timeout 10 2>$null | Out-Null
+	& unity command --project-path $project editor_stop --timeout 10 2>$null | Out-Null
 }
 
 function Get-LockTiming($lock) {
@@ -236,7 +230,7 @@ switch ($Mode) {
 			if ($lock -and $lock.corrupt) {
 				"Corrupt lock file $($file.Name); the next Unity command takes it over automatically."
 			} elseif ($lock) {
-				$project = Get-LockProject $lock
+				$project = [string]$lock.project
 				"Unity Editor lock for project $project held by $(Get-HolderLabel $lock.session $lock.cwd) since $($lock.time) (priority $(Get-LockPriority $lock)), expires $($lock.expires) ($($lock.purpose)) in $($lock.cwd). To take over: $runCmd force $(Format-ProjectArg $project) <your session id>"
 			}
 		}
@@ -245,7 +239,7 @@ switch ($Mode) {
 	'wait' {
 		# Polls (up to ~100s per call) until the project's lock is free or takeable; does not take it. Exit 0 = free, 3 = still held.
 		$project = Resolve-ProjectArg $Arg1
-		if (-not $project) { 'Usage: wait [project folder|unknown]'; exit 1 }
+		if (-not $project) { 'Usage: wait [project folder] (run it inside a Unity project or pass its folder)'; exit 1 }
 		$slot = Get-Slot $project
 		$deadline = (Get-Date).AddSeconds(100)
 		while ($true) {
@@ -262,7 +256,7 @@ switch ($Mode) {
 	}
 	'force' {
 		$project = Resolve-ProjectArg $Arg1
-		if (-not $project) { 'Usage: force [project folder|unknown] [sessionId]'; exit 1 }
+		if (-not $project) { 'Usage: force [project folder] [sessionId] (run it inside a Unity project or pass its folder)'; exit 1 }
 		$slot = Get-Slot $project
 		Stop-EditorActivity $project
 		$got = Enter-Mutex $slot.mutex
@@ -284,7 +278,7 @@ switch ($Mode) {
 		$slots = @(Get-AllSlots)
 		# A lock left by version 1.2 or older is dropped too, but only when this session owns it.
 		$legacy = Join-Path $lockDir 'unity-editor.lock'
-		if (Test-Path -LiteralPath $legacy) { $slots += New-Slot 'unknown' $legacy 'Global\ClaudeUnityEditorLock' }
+		if (Test-Path -LiteralPath $legacy) { $slots += New-Slot $null $legacy 'Global\ClaudeUnityEditorLock' }
 		foreach ($slot in $slots) {
 			$got = Enter-Mutex $slot.mutex
 			if ($got) {
@@ -303,7 +297,7 @@ switch ($Mode) {
 					$lock = Read-Lock $slot.path
 					if ($lock -and -not $lock.corrupt -and $lock.session -eq $sessionId) {
 						$graceEnd = (Get-Date).AddSeconds($graceSeconds)
-						$slot.project = Get-LockProject $lock
+						$slot.project = [string]$lock.project
 						if ([datetime]::Parse($lock.expires) -gt $graceEnd) { Write-Lock $slot $sessionId $lock.cwd $lock.purpose $graceEnd ([string]$lock.time) (Get-LockPriority $lock) }
 					}
 				} catch {} finally { Exit-Mutex $slot.mutex }
@@ -327,6 +321,8 @@ switch ($Mode) {
 		$cwd = if ($data) { [string]$data.cwd } else { '' }
 		# Computer use has no project argument, so it locks the session's own project.
 		$project = if ($isUnity) { Get-CommandProject $command $cwd } else { Find-ProjectRoot $cwd }
+		# Outside any Unity project there is no Editor to share: no lock, no priority question.
+		if (-not $project) { exit 0 }
 		$purpose = if ($isComputerUse) { "computer use ($toolName)" } else { ($command -replace '\s+', ' ') }
 		if ($purpose.Length -gt 80) { $purpose = $purpose.Substring(0, 80) }
 
