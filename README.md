@@ -1,6 +1,6 @@
 # unity-editor-lock
 
-A Claude Code plugin that stops parallel Claude sessions from interrupting each other's Unity Editor testing. One session at a time holds an exclusive lock on the Editor. A blocked session tells you which session blocks it and lets you choose **Wait** or **Force takeover** with buttons. It works in both the Claude desktop app and the Claude Code terminal, and sessions of both kinds on the same PC share one lock.
+A Claude Code plugin that stops parallel Claude sessions from interrupting each other's Unity Editor testing. One session at a time holds an exclusive lock on the Editor. A blocked session tells you which session blocks it and lets you choose **Wait** or **Force takeover** with buttons. It works in both the Claude desktop app and the Claude Code terminal, and sessions of both kinds on the same PC share one lock per Unity project.
 
 ## Requirements
 - Windows with Windows PowerShell 5.1 (included with Windows 10/11).
@@ -15,7 +15,7 @@ claude plugin install unity-editor-lock@unity-editor-lock
 ```
 Restart any running Claude sessions: sessions that were open before the install do not have the plugin's hooks.
 
-Update: `claude plugin marketplace update unity-editor-lock`, then `claude plugin update unity-editor-lock@unity-editor-lock`.
+Update: `claude plugin marketplace update unity-editor-lock`, then `claude plugin update unity-editor-lock@unity-editor-lock`. Restart all running sessions after updating: sessions still on an older version do not see the new per-project locks (versions before 1.3.0 used one global lock).
 Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 
 ## What it does
@@ -24,7 +24,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - A blocked session with equal or lower priority waits on its own, keeps you informed in chat, and never asks or forces (after 10 minutes it asks Keep waiting / Give up). A blocked **High** session facing a **Normal** holder tells you who blocks it and asks with buttons:
   - **Wait**: it polls with `wait` until the lock is free, then retries.
   - **Force takeover**: it cancels the holder's tests, stops play mode and takes the lock.
-- The lock is shared by every session and worktree on the same PC: it lives in `%USERPROFILE%\.claude\locks`, not in the project. It does **not** coordinate between different computers; each PC has its own Editor and its own lock.
+- There is one lock per Unity project, shared by every session on the same PC that uses that project folder (a worktree is a different folder, so it gets its own lock): sessions on different projects never block each other. The project is the `--project-path` of the Unity command, else `UNITY_PROJECT_PATH`, else the first folder upward from the session's folder that holds `ProjectSettings/ProjectVersion.txt`; computer use always uses the session's folder. Sessions outside any Unity project share one fallback lock, `unknown`. The locks live in `%USERPROFILE%\.claude\locks`, not in the project. They do **not** coordinate between different computers; each PC has its own Editors and its own locks.
 
 ## Lock rules
 - A command by the owner refreshes the lock to 5 minutes. When a turn ends the lock shrinks to a 60 second grace, and ending the session releases it.
@@ -32,8 +32,11 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - All reads and writes run under a named mutex. If the hook itself fails on a matched call, that call is blocked with a retry message instead of running unlocked.
 
 ## Script modes
-`pre`, `stop`, `release` are used by the hooks. Manual modes: `status`, `wait`, `force [sessionId]`, `priority <high|normal> <sessionId>`, run as
-`powershell -NoProfile -ExecutionPolicy Bypass -File "<plugin folder>/scripts/unity-lock.ps1" status`.
+`pre`, `stop`, `release` are used by the hooks (`stop` and `release` act on every project lock the session holds). Manual modes, run as
+`powershell -NoProfile -ExecutionPolicy Bypass -File "<plugin folder>/scripts/unity-lock.ps1" status`:
+- `status`: lists every held lock with its project.
+- `wait [project]` and `force [project] [sessionId]`: `project` is the Unity project folder or `unknown`; omitted, it is the project around the current folder. Block messages print these commands with the project filled in.
+- `priority <high|normal> <sessionId>`.
 
 ## Terminal notes
 - Closing a terminal abruptly (window close, Ctrl+C) may skip the SessionEnd hook. The orphaned lock then lapses on its own within about 5 minutes, or you can pick **Force takeover** in the next blocked session.
@@ -45,6 +48,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - Background subagents lose the lock after the 60 second grace when they make no Unity calls.
 - The session link lookup reads the Claude desktop app's own session files; if that layout changes, the message falls back to the bare session id.
 - Priority is the session model's own judgment unless you pick it; two High sessions wait first-come.
+- A command that `cd`s into another project before calling Unity, without `--project-path`, is locked under the session folder's project.
 - Windows only.
 
 ## License
