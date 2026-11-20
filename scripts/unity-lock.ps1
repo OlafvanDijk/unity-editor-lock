@@ -1,5 +1,5 @@
 # Unity Editor lock, one per Unity project: sessions on different projects never block each other.
-# Modes: pre (PreToolUse hook), stop (Stop hook: 1 minute grace), release (SessionEnd hook), status,
+# Modes: pre (PreToolUse hook), stop (Stop hook: 1 minute grace), release [sessionId] (SessionEnd hook, or by hand), status,
 #        wait [project], force [project] [sessionId] (manual takeover, hands the lock to sessionId),
 #        priority <high|normal> <sessionId> (records the playtest priority of a session).
 # [project] is a Unity project folder; omitted = the project around the current folder.
@@ -22,10 +22,17 @@ New-Item -ItemType Directory -Force $lockDir | Out-Null
 
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 $raw = ''
-if ($Mode -eq 'pre' -or $Mode -eq 'stop' -or $Mode -eq 'release') { $raw = [Console]::In.ReadToEnd() }
+# Hooks pipe JSON on stdin; a manual call has none, so never wait on the console.
+# A manual call from a tool shell can hold an open, never-closing stdin pipe: read it with a time limit.
+$readStdin = ($Mode -eq 'pre' -or $Mode -eq 'stop' -or ($Mode -eq 'release' -and -not $Arg1)) -and [Console]::IsInputRedirected
+if ($readStdin) {
+	# Raw stream: Console.In's own ReadToEndAsync is synchronous in .NET Framework and would ignore the time limit.
+	$task = (New-Object System.IO.StreamReader([Console]::OpenStandardInput())).ReadToEndAsync()
+	if ($task.Wait(3000)) { $raw = $task.Result }
+}
 $data = $null
 if ($raw) { try { $data = $raw | ConvertFrom-Json } catch {} }
-$sessionId = if ($data -and $data.session_id) { [string]$data.session_id } else { 'unknown' }
+$sessionId = if ($data -and $data.session_id) { [string]$data.session_id } elseif ($Mode -eq 'release' -and $Arg1) { $Arg1 } else { 'unknown' }
 
 # Full path without trailing slash ('C:\' stays), resolved against $base when relative; $null if unparsable.
 function Get-FullPath($path, $base = $null) {
@@ -157,20 +164,38 @@ function Save-Priority($id, $value, $waitSince = $null) {
 }
 function Get-LockPriority($lock) { if ($lock -and $lock.priority -eq 'high') { return 'high' } else { return 'normal' } }
 
-# True unless the Editor clearly reports: edit mode, not compiling/reloading, no test running. Unreachable counts as busy.
+# Runs an Editor command, trying the next (older CLI) name only when the CLI does not know the current one.
+# Returns @{ state = 'ok' | 'closed' | 'error'; result }: 'closed' = no Editor runs for the project,
+# 'error' = anything else (timeout, Editor stuck in a reload, unparsable reply).
+function Invoke-EditorCommand($project, [string[]]$names) {
+	foreach ($name in $names) {
+		try {
+			$words = $name -split ' '
+			$reply = (& unity command --project-path $project @words --json --timeout 10 2>$null | Out-String) | ConvertFrom-Json
+			if ($reply.success) { return @{ state = 'ok'; result = $reply.data.result } }
+			$why = ($reply.errors | ForEach-Object { $_.message }) -join ' '
+			if ($why -match 'No Pipeline instance found') { return @{ state = 'closed' } }
+			if ($why -notmatch 'Command Not Found') { break }
+		} catch { break }
+	}
+	return @{ state = 'error' }
+}
+
+# True unless the Editor is closed, or answers that it is in edit mode, not compiling/reloading and runs no test.
+# A closed Editor has nothing to protect; one that does not answer properly counts as busy.
 function Test-EditorBusy($project) {
-	try {
-		$out = & unity command --project-path $project editor_status --json --timeout 10 2>$null | Out-String
-		$editor = ($out | ConvertFrom-Json).data.result
-		if ($editor.playMode -ne 'stopped' -or $editor.compiling -or $editor.domainReloadInProgress) { return $true }
-		$out = & unity command --project-path $project test_status --json --timeout 10 2>$null | Out-String
-		return ((($out | ConvertFrom-Json).data.result.status) -ne 'no_tests')
-	} catch { return $true }
+	$editor = Invoke-EditorCommand $project 'editor status', 'editor_status'
+	if ($editor.state -eq 'closed') { return $false }
+	if ($editor.state -ne 'ok') { return $true }
+	$e = $editor.result
+	if ($e.playMode -ne 'stopped' -or $e.compiling -or $e.domainReloadInProgress) { return $true }
+	$tests = Invoke-EditorCommand $project 'test status', 'test_status'
+	return ($tests.state -ne 'ok' -or $tests.result.status -ne 'no_tests')
 }
 
 function Stop-EditorActivity($project) {
-	& unity command --project-path $project cancel_tests --timeout 10 2>$null | Out-Null
-	& unity command --project-path $project editor_stop --timeout 10 2>$null | Out-Null
+	$null = Invoke-EditorCommand $project 'test cancel', 'cancel_tests'
+	$null = Invoke-EditorCommand $project 'editor playmode stop', 'editor_stop'
 }
 
 function Get-LockTiming($lock) {
@@ -274,6 +299,8 @@ switch ($Mode) {
 		"Priority of session $Arg2 set to $Arg1. Retry your Unity command."
 	}
 	'release' {
+		if ($sessionId -eq 'unknown') { 'Usage: release <sessionId> (frees every Unity Editor lock that session holds)'; exit 1 }
+		$released = 0
 		Remove-Item (Get-PriorityFile $sessionId) -Force -ErrorAction SilentlyContinue
 		$slots = @(Get-AllSlots)
 		# A lock left by version 1.2 or older is dropped too, but only when this session owns it.
@@ -284,10 +311,11 @@ switch ($Mode) {
 			if ($got) {
 				try {
 					$lock = Read-Lock $slot.path
-					if ($lock -and -not $lock.corrupt -and $lock.session -eq $sessionId) { Remove-Item -LiteralPath $slot.path -Force }
+					if ($lock -and -not $lock.corrupt -and $lock.session -eq $sessionId) { Remove-Item -LiteralPath $slot.path -Force; $released++ }
 				} catch {} finally { Exit-Mutex $slot.mutex }
 			}
 		}
+		if (-not $data) { "Released $released Unity Editor lock(s) held by session $sessionId." }
 	}
 	'stop' {
 		foreach ($slot in Get-AllSlots) {

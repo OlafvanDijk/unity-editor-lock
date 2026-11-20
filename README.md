@@ -28,7 +28,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 
 ## Lock rules
 - A command by the owner refreshes the lock to 5 minutes. When a turn ends the lock shrinks to a 60 second grace, and ending the session releases it.
-- Another session takes over automatically only when the lock has lapsed AND the Editor is idle (play mode stopped, not compiling or reloading, no test running; an unreachable Editor counts as busy). A lock that lapsed more than 30 minutes ago, or a corrupt lock file, is also taken over.
+- Another session takes over automatically only when the lock has lapsed AND the Editor is idle (play mode stopped, not compiling or reloading, no test running; a closed or unreachable Editor counts as idle). A lock that lapsed more than 30 minutes ago, or a corrupt lock file, is also taken over.
 - All reads and writes run under a named mutex. If the hook itself fails on a matched call, that call is blocked with a retry message instead of running unlocked.
 
 ## Script modes
@@ -37,6 +37,7 @@ Uninstall: `claude plugin uninstall unity-editor-lock@unity-editor-lock`.
 - `status`: lists every held lock with its project.
 - `wait [project]` and `force [project] [sessionId]`: `project` is the Unity project folder; omitted, it is the project around the current folder. Block messages print these commands with the project filled in.
 - `priority <high|normal> <sessionId>`.
+- `release <sessionId>`: frees every lock that session holds (what the SessionEnd hook does).
 
 ## Terminal notes
 - Closing a terminal abruptly (window close, Ctrl+C) may skip the SessionEnd hook. The orphaned lock then lapses on its own within about 5 minutes, or you can pick **Force takeover** in the next blocked session.
